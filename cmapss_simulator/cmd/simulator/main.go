@@ -31,8 +31,11 @@ func getEnvAsInt(key string, fallback int) int {
 
 func main() {
 	// 1. BOOTSTRAPPING & ENV
-	if err := godotenv.Load("configs/.env"); err != nil {
-		pterm.Warning.Println("Файл configs/.env не найден. Используются переменные окружения ОС.")
+	// 🚨 ПАРАНОЙЯ L1 (Гибкие пути): Проверяем .env в корне, затем в configs/
+	if err := godotenv.Load(".env"); err != nil {
+		if err := godotenv.Load("configs/.env"); err != nil {
+			pterm.Warning.Println("Файл .env не найден. Запуск на дефолтных значениях.")
+		}
 	}
 
 	runID := fmt.Sprintf("run_%s", time.Now().Format("20060102_150405"))
@@ -74,6 +77,10 @@ func main() {
 		Compression:    getEnvAsInt("COMPRESSION_LEVEL", 1),
 		OutputDir:      os.Getenv("DATA_OUTPUT_DIR"),
 		RunID:          runID,
+	}
+
+	if workerCfg.OutputDir == "" {
+		workerCfg.OutputDir = "data/telemetry"
 	}
 
 	// 2. INITIALIZATION
