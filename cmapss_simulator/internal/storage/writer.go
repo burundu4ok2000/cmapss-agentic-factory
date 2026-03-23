@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -53,8 +54,15 @@ func (rb *RecordBuilder) Release() {
 	}
 }
 
+// 🚨 ПАРАНОЙЯ L5 (Interface Hiding):
+// Прячем метод Close() от библиотеки Arrow, чтобы она не закрыла файл раньше времени.
+// Это возвращает нам полный контроль над жизненным циклом файла для выполнения fsync.
+type noCloseWriter struct {
+	io.Writer
+}
+
 // WriteParquetAtomically сохраняет Arrow Record в файл с максимальной паранойей.
-func WriteParquetAtomically(record arrow.RecordBatch, targetPath string, compressionLevel int) error {
+func WriteParquetAtomically(batch arrow.RecordBatch, targetPath string, compressionLevel int) error {
 	// Убеждаемся, что директория существует (например: data/telemetry/run_id=X/unit_number=Y/date=Z/)
 	dir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -78,7 +86,7 @@ func WriteParquetAtomically(record arrow.RecordBatch, targetPath string, compres
 	)
 
 	// Создаем Parquet Writer на основе Arrow Record
-	writer, err := pqarrow.NewFileWriter(record.Schema(), file, props, pqarrow.DefaultWriterProps())
+	writer, err := pqarrow.NewFileWriter(batch.Schema(), noCloseWriter{file}, props, pqarrow.DefaultWriterProps())
 	if err != nil {
 		file.Close() // Закрываем файл перед возвратом ошибки
 		os.Remove(tmpPath)
@@ -86,7 +94,7 @@ func WriteParquetAtomically(record arrow.RecordBatch, targetPath string, compres
 	}
 
 	// Пишем рекорд в память Writer-а
-	if err := writer.Write(record); err != nil {
+	if err := writer.Write(batch); err != nil {
 		writer.Close()
 		file.Close()
 		os.Remove(tmpPath)
