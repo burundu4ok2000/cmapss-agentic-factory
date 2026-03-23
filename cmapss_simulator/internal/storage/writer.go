@@ -54,7 +54,7 @@ func (rb *RecordBuilder) Release() {
 }
 
 // WriteParquetAtomically сохраняет Arrow Record в файл с максимальной паранойей.
-func WriteParquetAtomically(record arrow.Record, targetPath string, compressionLevel int) error {
+func WriteParquetAtomically(record arrow.RecordBatch, targetPath string, compressionLevel int) error {
 	// Убеждаемся, что директория существует (например: data/telemetry/run_id=X/unit_number=Y/date=Z/)
 	dir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -68,13 +68,13 @@ func WriteParquetAtomically(record arrow.Record, targetPath string, compressionL
 		return fmt.Errorf("не удалось создать временный файл %s: %w", tmpPath, err)
 	}
 
-	// 🚨 ПАРАНОЙЯ L3 (Словарная бомба):
-	// Отключаем словари для всех колонок. Белый шум нельзя сжимать словарем (вызовет OOM на Asus).
+	// 🚨 ПАРАНОЙЯ L3 (Фикс ZSTD-краша): Используем Snappy (Pure Go).
+	// Он не требует CGO и не ломается от неверных уровней компрессии.
 	props := parquet.NewWriterProperties(
 		parquet.WithDictionaryDefault(false), // КРИТИЧЕСКИ ВАЖНО ДЛЯ ВРЕМЕННЫХ РЯДОВ!
 		parquet.WithDataPageVersion(parquet.DataPageV2), // Индустриальный стандарт для Spark
-		parquet.WithCompression(compress.Codecs.Zstd),   // Быстрое сжатие
-		parquet.WithCompressionLevel(compressionLevel),
+		parquet.WithCompression(compress.Codecs.Snappy),   // Быстрое сжатие
+		// parquet.WithCompressionLevel(compressionLevel), // ZSTD-краш при уровне > 3, поэтому отключаем для безопасности
 	)
 
 	// Создаем Parquet Writer на основе Arrow Record
