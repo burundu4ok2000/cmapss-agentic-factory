@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	// Подключаем CGO-free драйвер SQLite (AI-Ready standard)
@@ -18,6 +19,8 @@ type DispatcherConfig struct {
 	SimulationMode  string // "REALTIME" или "ACCELERATED"
 	MinDurationSec  int
 	MaxDurationSec  int
+	IdleMinSec      int // new: 
+	IdleMaxSec      int // для имитации простоя между полетами
 	AnchorTime      time.Time
 	BatchSize       int
 	FlushIntervalMs int
@@ -29,6 +32,12 @@ type Dispatcher struct {
 	TakeoffChan chan TakeoffRequest
 	LandingChan chan LandingReport
 	config      DispatcherConfig
+
+	// 🚨 ПАРАНОЙЯ: Логические часы двигателей для режима ACCELERATED.
+	// Гарантируют непрерывность времени между полетами без коллизий.
+	unitClocks  map[int32]time.Time
+	
+	wg          sync.WaitGroup // NEW: Внутренний счетчик Диспетчера
 }
 
 // NewDispatcher подключается к БД, валидирует конфигурацию и делает Recovery.
@@ -37,6 +46,11 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	if cfg.MinDurationSec <= 0 || cfg.MaxDurationSec <= 0 || cfg.MinDurationSec > cfg.MaxDurationSec {
 		return nil, fmt.Errorf("FATAL: Невалидные тайминги полета (min=%d, max=%d)", cfg.MinDurationSec, cfg.MaxDurationSec)
 	}
+
+	if cfg.IdleMinSec < 0 || cfg.IdleMaxSec < 0 || cfg.IdleMinSec > cfg.IdleMaxSec {
+    return nil, fmt.Errorf("FATAL: Невалидные тайминги простоя (min=%d, max=%d)", cfg.IdleMinSec, cfg.IdleMaxSec)
+	}
+
 	if cfg.BatchSize <= 0 || cfg.FlushIntervalMs <= 0 {
 		return nil, fmt.Errorf("FATAL: Невалидные настройки батчинга (size=%d, interval=%d)", cfg.BatchSize, cfg.FlushIntervalMs)
 	}
@@ -64,7 +78,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	// 🚨 ПАРАНОЙЯ L3: Recovery (Санитарная очистка брошенных полетов)
 	res, err := db.Exec("UPDATE flights SET status = 'PENDING' WHERE status IN ('IN_FLIGHT', 'INTERRUPTED')")
 	if err != nil {
-		return nil, fmt.Errorf("ошибка Recovery: %w", err)
+		return nil, fmt.Errorf("ошибка Recovery при обновлении статусов: %w", err)
 	}
 	rowsAffected, _ := res.RowsAffected()
 	if rowsAffected > 0 {
@@ -76,13 +90,24 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		TakeoffChan: make(chan TakeoffRequest, cfg.BatchSize), // Буфер канала зависит от конфига
 		LandingChan: make(chan LandingReport, cfg.BatchSize),
 		config:      cfg,
+		unitClocks:  make(map[int32]time.Time), //new: Инициализация логических часов для каждого двигателя
 	}, nil
 }
 
-// Start запускает Event Loop в фоновой горутине.
+// Start запускает Event Loop в фоновой горутине. NEW
 func (d *Dispatcher) Start(ctx context.Context) {
-	go d.runEventLoop(ctx)
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done() // Гарантирует, что Wait() разблокируется только после db.Close()
+		d.runEventLoop(ctx)
+	}()
 }
+
+// Wait блокирует вызывающую горутину, пока Диспетчер полностью не остановится.
+func (d *Dispatcher) Wait() {
+    d.wg.Wait()
+}
+
 
 // runEventLoop — сердце Диспетчера. Обеспечивает Lock-Free доступ к БД.
 func (d *Dispatcher) runEventLoop(ctx context.Context) {
@@ -151,21 +176,31 @@ func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 		return
 	}
 
-	// 🚨 ПАРАНОЙЯ L5: Исправленная логика времени (Timezone Poisoning + SIMULATION_MODE)
+	durationSec := rand.IntN(d.config.MaxDurationSec-d.config.MinDurationSec+1) + d.config.MinDurationSec
+
 	var startTime time.Time
+
+	// 🚨 ПАРАНОЙЯ L5: Машина состояний времени. NEW
 	if d.config.SimulationMode == "REALTIME" {
-		startTime = time.Now().UTC() // Обязательно UTC для совместимости со Spark
+		startTime = time.Now().UTC()
 	} else {
-		startTime = d.config.AnchorTime // В ускоренном режиме используем якорь
+		lastTime, exists := d.unitClocks[req.UnitNumber]
+		if !exists {
+			lastTime = d.config.AnchorTime
+		}
+		idleSec := rand.IntN(d.config.IdleMaxSec-d.config.IdleMinSec+1) + d.config.IdleMinSec
+		startTime = lastTime.Add(time.Duration(idleSec) * time.Second)
+		d.unitClocks[req.UnitNumber] = startTime.Add(time.Duration(durationSec) * time.Second)
 	}
 
-	durationSec := rand.IntN(d.config.MaxDurationSec-d.config.MinDurationSec+1) + d.config.MinDurationSec
 	startTimeStr := startTime.Format(time.RFC3339)
 
 	updateQ := `UPDATE flights SET status = 'IN_FLIGHT', flight_start_time = ?, target_duration_sec = ? WHERE unit_number = ? AND time_cycles = ?`
 	_, err = d.db.Exec(updateQ, startTimeStr, durationSec, rec.UnitNumber, rec.TimeCycles)
 	if err != nil {
 		log.Printf("[DISPATCHER] Ошибка бронирования рейса Unit-%d: %v", req.UnitNumber, err)
+		req.RespChan <- TakeoffResponse{HasMoreFlights: false} // <-- Отменяем старт для воркера
+		return // <-- Обязательно прерываем функцию, иначе воркер получит данные, но рейс не будет забронирован, что приведет к коллизиям и неконсистентности данных.
 	}
 
 	req.RespChan <- TakeoffResponse{
