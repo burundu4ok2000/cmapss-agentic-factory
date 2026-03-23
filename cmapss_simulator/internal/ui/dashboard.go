@@ -68,6 +68,11 @@ func StartDashboard(ctx context.Context, m *flight.SharedMetrics, runID string, 
 				errorStr = pterm.Red(fmt.Sprintf("%d", errors))
 			}
 
+			modeStr := pterm.Green(mode)
+			if mode == "ACCELERATED" {
+				modeStr = pterm.Yellow(mode)
+			}
+
 			content := fmt.Sprintf(`
  %s %s
  %s %s
@@ -80,7 +85,7 @@ func StartDashboard(ctx context.Context, m *flight.SharedMetrics, runID string, 
  %s %s
 `,
 				pterm.Cyan("Run ID:"), runID,
-				pterm.Cyan("Mode:"), mode,
+				pterm.Cyan("Mode:"), modeStr,
 				pterm.Cyan("Uptime:"), uptime,
 				pterm.Blue("Active Pilots:"), active,
 				pterm.Blue("Total Flights:"), flights,
