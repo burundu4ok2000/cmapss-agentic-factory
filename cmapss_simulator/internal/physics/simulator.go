@@ -32,11 +32,11 @@ func SimulateAndSave(rec database.FlightRecord, startTime time.Time, durationSec
 		return fmt.Errorf("сбой физического движка: %w", err)
 	}
 
-	// 3. Формирование неизменяемого Arrow Record
-	// ВНИМАНИЕ: NewRecord() инкрементирует внутренний счетчик ссылок C-памяти.
-	record := rb.GetBuilder().NewRecordBatch()
-	defer record.Release() // 🚨 ПАРАНОЙЯ L4: Обязательное освобождение памяти итогового батча!
-
+	// 3. Формирование неизменяемого массива данных (Arrow RecordBatch)
+	// ВНИМАНИЕ: NewRecordBatch() выделяет off-heap память и инкрементирует внутренний счетчик ссылок.
+	batch := rb.GetBuilder().NewRecordBatch()
+	defer batch.Release() // 🚨 ПАРАНОЙЯ L4: Гарантированное освобождение C-памяти батча при выходе из функции!
+	
 	// 4. Дата-Озеро (Hive Partitioning)
 	// Используем startTime.UTC(), чтобы Spark не словил Timezone Poisoning.
 	dateStr := startTime.UTC().Format("2006-01-02")
@@ -50,7 +50,7 @@ func SimulateAndSave(rec database.FlightRecord, startTime time.Time, durationSec
 	)
 
 	// 5. Безопасный I/O (Atomic Write + Fsync + Parquet ZSTD)
-	if err := storage.WriteParquetAtomically(record, targetPath, cfg.CompressionLevel); err != nil {
+	if err := storage.WriteParquetAtomically(batch, targetPath, cfg.CompressionLevel); err != nil {
 		return fmt.Errorf("критический сбой записи на диск: %w", err)
 	}
 
