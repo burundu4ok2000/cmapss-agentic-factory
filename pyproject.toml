@@ -1,7 +1,7 @@
 [project]
-name = "pet-project"
+name = "cmapss-agentic-factory"
 version = "0.1.0"
-description = "Add your description here"
+description = "Industrial IoT Edge simulator & Multi-Agent orchestration pipeline for predictive maintenance. Streams NASA C-MAPSS telemetry with injected noise into an LLM-driven Factory 4.0 ecosystem, featuring automated RUL analysis and built-in chaos engineering."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
