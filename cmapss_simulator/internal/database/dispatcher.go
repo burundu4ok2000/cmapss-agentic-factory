@@ -96,14 +96,14 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 
 // Start запускает Event Loop в фоновой горутине. NEW
 func (d *Dispatcher) Start(ctx context.Context) {
-	d.wg.Add(1)
+	d.wg.Add(1) // Увеличиваем счетчик Диспетчера, чтобы Wait() знал, что есть активная горутина
 	go func() {
-		defer d.wg.Done() // Гарантирует, что Wait() разблокируется только после db.Close()
+		defer d.wg.Done() // Снимаем блокировку, когда цикл завершится
 		d.runEventLoop(ctx)
 	}()
 }
 
-// Wait блокирует вызывающую горутину, пока Диспетчер полностью не остановится.
+// Wait блокирует выполнение, пока Диспетчер безопасно не завершит работу (Flush)
 func (d *Dispatcher) Wait() {
     d.wg.Wait()
 }
