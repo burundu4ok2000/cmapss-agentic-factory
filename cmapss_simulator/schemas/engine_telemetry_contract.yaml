@@ -1,0 +1,171 @@
+# Файл: schemas/engine_telemetry_contract.yaml
+name: "cmapss_engine_telemetry"
+version: "1.0.0"
+owner: "Data_Platform_Team"
+description: "Data contract for NASA C-MAPSS aircraft engine telemetry. Defines physical constraints and schema."
+
+# Соглашение об уровне обслуживания (Service Level Agreement)
+sla:
+  max_latency_sec: 300
+  expected_frequency_hz: 100
+  data_retention_days: 3650 # 10 лет хранения (Aviation Compliance)
+
+schema:
+  system_columns:
+    - name: id
+      type: integer
+      primary_key: true
+      autoincrement: true
+      description: "Суррогатный ключ для идемпотентности (Защита от дублей в Iceberg)"
+    - name: status
+      type: string
+      default: "'PENDING'"
+      description: "Статус обработки полетного цикла (PENDING/COMPLETED/FAILED)"
+    - name: flight_start_time
+      type: string
+      nullable: true
+      description: "ISO8601 временная метка начала симуляции полета"
+    - name: target_duration_sec
+      type: integer
+      nullable: true
+      description: "Ожидаемая длительность полета в секундах (Target length)"
+
+  domain_columns:
+    # ---------------- Метаданные борта ----------------
+    - name: unit_number
+      type: integer
+      required: true
+      description: "Уникальный идентификатор борта (турбины)"
+    - name: time_cycles
+      type: integer
+      required: true
+      unit: "cycles"
+      description: "Текущее время жизни двигателя (в полетных циклах)"
+      
+    # ---------------- Условия полета (Environment) ----------------
+    - name: op_setting_1
+      type: float
+      required: true
+      unit: "ft"
+      description: "Операционная настройка 1: Высота полета (Altitude)"
+    - name: op_setting_2
+      type: float
+      required: true
+      unit: "Mach"
+      description: "Операционная настройка 2: Число Маха (Скорость)"
+    - name: op_setting_3
+      type: float
+      required: true
+      unit: "TRA"
+      description: "Операционная настройка 3: Угол положения дросселя (Throttle Resolver Angle)"
+
+    # ---------------- Физические датчики (Sensors) ----------------
+    - name: T2
+      type: float
+      required: true
+      unit: "°R"
+      description: "Полная температура на входе вентилятора"
+    - name: T24
+      type: float
+      required: true
+      unit: "°R"
+      description: "Полная температура на выходе LPC (компрессора низкого давления)"
+    - name: T30
+      type: float
+      required: true
+      unit: "°R"
+      description: "Полная температура на выходе HPC (компрессора высокого давления)"
+    - name: T50
+      type: float
+      required: true
+      unit: "°R"
+      description: "Полная температура на выходе LPT (турбины низкого давления). Главный маркер EGT Margin."
+    - name: P2
+      type: float
+      required: true
+      unit: "psia"
+      description: "Давление на входе вентилятора"
+    - name: P15
+      type: float
+      required: true
+      unit: "psia"
+      description: "Полное давление в байпасном канале"
+    - name: P30
+      type: float
+      required: true
+      unit: "psia"
+      description: "Полное давление на выходе HPC"
+    - name: Nf
+      type: float
+      required: true
+      unit: "rpm"
+      description: "Физическая скорость вращения вентилятора (Ground Truth Anchor)"
+    - name: Nc
+      type: float
+      required: true
+      unit: "rpm"
+      description: "Физическая скорость вращения ядра (ротора)"
+    - name: epr
+      type: float
+      required: true
+      unit: "ratio"
+      description: "Степень повышения давления двигателя (P50/P2)"
+    - name: Ps30
+      type: float
+      required: true
+      unit: "psia"
+      description: "Статическое давление на выходе HPC"
+    - name: phi
+      type: float
+      required: true
+      unit: "pps/psi"
+      description: "Отношение расхода топлива к статическому давлению Ps30"
+    - name: NRf
+      type: float
+      required: true
+      unit: "rpm"
+      description: "Скорректированная скорость вращения вентилятора"
+    - name: NRc
+      type: float
+      required: true
+      unit: "rpm"
+      description: "Скорректированная скорость вращения ядра"
+    - name: BPR
+      type: float
+      required: true
+      unit: "ratio"
+      description: "Байпасное отношение (Bypass Ratio)"
+    - name: farB
+      type: float
+      required: true
+      unit: "ratio"
+      description: "Отношение топливовоздушной смеси горелки"
+    - name: htBleed
+      type: float
+      required: true
+      unit: "btu/lbm"
+      description: "Энтальпия отбираемого воздуха"
+    - name: Nf_dmd
+      type: float
+      required: true
+      unit: "rpm"
+      description: "Требуемая скорость вентилятора (Запрос тяги)"
+    - name: PCNfR_dmd
+      type: float
+      required: true
+      unit: "rpm"
+      description: "Требуемая скорректированная скорость вентилятора"
+    - name: W31
+      type: float
+      required: true
+      unit: "lbm/s"
+      description: "Расход охлаждающей жидкости HPT"
+    - name: W32
+      type: float
+      required: true
+      unit: "lbm/s"
+      description: "Расход охлаждающей жидкости LPT"
+
+indexes:
+  - name: "idx_flights_unit_cycle"
+    columns: ["unit_number", "time_cycles"]

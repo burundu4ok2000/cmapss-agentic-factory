@@ -7,7 +7,7 @@ ETL Скрипт инициализации базы данных для C-MAPSS
 import sqlite3
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import Tuple
 
 # Настройка логирования для красивого вывода в консоль
 logging.basicConfig(
@@ -17,15 +17,23 @@ logging.basicConfig(
 )
 
 
-def setup_database(db_path: Path) -> None:
+def setup_database(db_path: Path, schema_path: Path) -> None:
     """
     Создает базу данных и таблицу flights (Идемпотентно).
 
     Args:
         db_path (Path): Абсолютный путь к файлу SQLite.
+        schema_path (Path): Абсолютный путь к .sql файлу со схемой.
     """
     # Создаем папку data, если её вдруг нет
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not schema_path.exists():
+        raise FileNotFoundError(f"Файл схемы не найден: {schema_path}. Остановка инициализации.")
+    
+    # Читаем DDL из единого источника истины
+    with open(schema_path, "r", encoding="utf-8") as schema_file:
+        ddl_script = schema_file.read()
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -35,50 +43,13 @@ def setup_database(db_path: Path) -> None:
     cursor.execute("PRAGMA journal_mode=WAL;")
     cursor.execute("PRAGMA synchronous=NORMAL;")
 
-    logging.info("Создание таблицы 'flights' (DROP IF EXISTS)...")
-    cursor.execute("DROP TABLE IF EXISTS flights;")
+    logging.info(f"Применение миграции из {schema_path.name}...")
+    # executescript позволяет выполнить несколько команд (DROP, CREATE, CREATE INDEX) за раз
+    cursor.executescript(ddl_script)
 
-    # DDL схемы на основе дата-контракта (26 физических + 3 системные колонки)
-    create_table_query = """
-    CREATE TABLE flights (
-        -- Системные колонки (Метаданные симулятора)
-        status TEXT DEFAULT 'PENDING',
-        flight_start_time TEXT DEFAULT NULL,
-        target_duration_sec INTEGER DEFAULT NULL,
-        
-        -- Физические колонки NASA
-        unit_number INTEGER,
-        time_cycles INTEGER,
-        op_setting_1 REAL,
-        op_setting_2 REAL,
-        op_setting_3 REAL,
-        T2 REAL,
-        T24 REAL,
-        T30 REAL,
-        T50 REAL,
-        P2 REAL,
-        P15 REAL,
-        P30 REAL,
-        Nf REAL,
-        Nc REAL,
-        epr REAL,
-        Ps30 REAL,
-        phi REAL,
-        NRf REAL,
-        NRc REAL,
-        BPR REAL,
-        farB REAL,
-        htBleed REAL,
-        Nf_dmd REAL,
-        PCNfR_dmd REAL,
-        W31 REAL,
-        W32 REAL
-    );
-    """
-    cursor.execute(create_table_query)
     conn.commit()
     conn.close()
-    logging.info("Схема таблицы 'flights' успешно создана.")
+    logging.info("Схема базы данных успешно инициализирована из внешнего файла.")
 
 
 def parse_and_validate_line(
@@ -207,7 +178,11 @@ def main():
     txt_file_path = project_root / "data" / "cmapss_data" / "train_FD001.txt"
     sqlite_db_path = project_root / "data" / "blueprints.sqlite"
 
-    setup_database(sqlite_db_path)
+    # Указываем путь к нашему вынесенному SQL-файлу
+    schema_path = project_root / "schemas" / "migrations" / "V001_initial_schema.sql"
+
+
+    setup_database(sqlite_db_path, schema_path)
     load_data_to_sqlite(txt_file_path, sqlite_db_path)
 
 
