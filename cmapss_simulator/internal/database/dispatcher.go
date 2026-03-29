@@ -13,42 +13,48 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// DispatcherConfig — структура для чистой передачи настроек (избавление от длинных списков аргументов).
+// ==============================================================================
+// ДИСПЕТЧЕР ВОЗДУШНОГО ДВИЖЕНИЯ (State Orchestrator)
+// AI-Ready: Lock-Free архитектура (CSP), Batch-оптимизация I/O, Защита от OOM.
+// Опирается на автосгенерированные контракты (schema_generated.go).
+// ==============================================================================
+
+// DispatcherConfig — структура для чистой передачи настроек.
 type DispatcherConfig struct {
 	DBPath          string
 	SimulationMode  string // "REALTIME" или "ACCELERATED"
 	MinDurationSec  int
 	MaxDurationSec  int
-	IdleMinSec      int // new: 
-	IdleMaxSec      int // для имитации простоя между полетами
+	IdleMinSec      int // Имитация простоя на земле (Turnaround time)
+	IdleMaxSec      int 
 	AnchorTime      time.Time
 	BatchSize       int
 	FlushIntervalMs int
 }
 
-// Dispatcher — монопольный владелец SQLite. Оркестрирует конкурентный I/O.
+// Dispatcher — монопольный владелец соединения с SQLite. Оркестрирует I/O без мьютексов.
 type Dispatcher struct {
 	db          *sql.DB
 	TakeoffChan chan TakeoffRequest
 	LandingChan chan LandingReport
 	config      DispatcherConfig
 
-	// 🚨 ПАРАНОЙЯ: Логические часы двигателей для режима ACCELERATED.
+	// unitClocks: Логические часы двигателей для режима ACCELERATED.
 	// Гарантируют непрерывность времени между полетами без коллизий.
-	unitClocks  map[int32]time.Time
-	
-	wg          sync.WaitGroup // NEW: Внутренний счетчик Диспетчера
+	unitClocks map[int32]time.Time
+
+	wg sync.WaitGroup // Счетчик активных горутин Диспетчера
 }
 
 // NewDispatcher подключается к БД, валидирует конфигурацию и делает Recovery.
 func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
-	// 🚨 ПАРАНОЙЯ: Sanity Check (Защита от паники rand.IntN)
+	// 🚨 ПАРАНОЙЯ L1: Sanity Check конфига
 	if cfg.MinDurationSec <= 0 || cfg.MaxDurationSec <= 0 || cfg.MinDurationSec > cfg.MaxDurationSec {
 		return nil, fmt.Errorf("FATAL: Невалидные тайминги полета (min=%d, max=%d)", cfg.MinDurationSec, cfg.MaxDurationSec)
 	}
 
 	if cfg.IdleMinSec < 0 || cfg.IdleMaxSec < 0 || cfg.IdleMinSec > cfg.IdleMaxSec {
-    return nil, fmt.Errorf("FATAL: Невалидные тайминги простоя (min=%d, max=%d)", cfg.IdleMinSec, cfg.IdleMaxSec)
+		return nil, fmt.Errorf("FATAL: Невалидные тайминги простоя (min=%d, max=%d)", cfg.IdleMinSec, cfg.IdleMaxSec)
 	}
 
 	if cfg.BatchSize <= 0 || cfg.FlushIntervalMs <= 0 {
@@ -60,10 +66,10 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		return nil, fmt.Errorf("ошибка открытия БД: %w", err)
 	}
 
-	// 🚨 ПАРАНОЙЯ L1: Запрет мультиплексирования (один коннект к файлу)
+	// 🚨 ПАРАНОЙЯ L2: Запрет мультиплексирования (один коннект к файлу для избежания Database is locked)
 	db.SetMaxOpenConns(1)
 
-	// 🚨 ПАРАНОЙЯ L2: WAL режим + Autocheckpoint (Спасение SSD от переполнения журнала)
+	// 🚨 ПАРАНОЙЯ L3: WAL режим + Autocheckpoint (Спасение SSD от переполнения журнала)
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL;",
 		"PRAGMA synchronous=NORMAL;",
@@ -75,7 +81,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		}
 	}
 
-	// 🚨 ПАРАНОЙЯ L3: Recovery (Санитарная очистка брошенных полетов)
+	// 🚨 ПАРАНОЙЯ L4: Recovery (Санитарная очистка брошенных полетов после краша)
 	res, err := db.Exec("UPDATE flights SET status = 'PENDING' WHERE status IN ('IN_FLIGHT', 'INTERRUPTED')")
 	if err != nil {
 		return nil, fmt.Errorf("ошибка Recovery при обновлении статусов: %w", err)
@@ -87,33 +93,32 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 
 	return &Dispatcher{
 		db:          db,
-		TakeoffChan: make(chan TakeoffRequest, cfg.BatchSize), // Буфер канала зависит от конфига
+		TakeoffChan: make(chan TakeoffRequest, cfg.BatchSize),
 		LandingChan: make(chan LandingReport, cfg.BatchSize),
 		config:      cfg,
-		unitClocks:  make(map[int32]time.Time), //new: Инициализация логических часов для каждого двигателя
+		unitClocks:  make(map[int32]time.Time),
 	}, nil
 }
 
-// Start запускает Event Loop в фоновой горутине. NEW
+// Start запускает Event Loop в фоновой горутине.
 func (d *Dispatcher) Start(ctx context.Context) {
-	d.wg.Add(1) // Увеличиваем счетчик Диспетчера, чтобы Wait() знал, что есть активная горутина
+	d.wg.Add(1)
 	go func() {
-		defer d.wg.Done() // Снимаем блокировку, когда цикл завершится
+		defer d.wg.Done()
 		d.runEventLoop(ctx)
 	}()
 }
 
-// Wait блокирует выполнение, пока Диспетчер безопасно не завершит работу (Flush)
+// Wait блокирует вызывающую горутину, пока Диспетчер полностью не остановится.
 func (d *Dispatcher) Wait() {
-    d.wg.Wait()
+	d.wg.Wait()
 }
 
-
-// runEventLoop — сердце Диспетчера. Обеспечивает Lock-Free доступ к БД.
+// runEventLoop — сердце Диспетчера. Обеспечивает Lock-Free доступ к БД через каналы (CSP).
 func (d *Dispatcher) runEventLoop(ctx context.Context) {
-	// Пред-аллокация памяти (Zero-Allocation паттерн)
+	// Пред-аллокация памяти (Zero-Allocation паттерн) для батчинга
 	landingBatch := make([]LandingReport, 0, d.config.BatchSize)
-	
+
 	flushTicker := time.NewTicker(time.Duration(d.config.FlushIntervalMs) * time.Millisecond)
 	defer flushTicker.Stop()
 
@@ -122,7 +127,7 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// 🚨 ПАРАНОЙЯ L4: Graceful Shutdown
+			// 🚨 ПАРАНОЙЯ L5: Graceful Shutdown
 			if len(landingBatch) > 0 {
 				d.flushLandings(landingBatch)
 			}
@@ -137,7 +142,7 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 			landingBatch = append(landingBatch, report)
 			if len(landingBatch) >= d.config.BatchSize {
 				d.flushLandings(landingBatch)
-				landingBatch = landingBatch[:0] // Очистка среза без утечек памяти
+				landingBatch = landingBatch[:0] // Очистка среза без переаллокации
 			}
 
 		case <-flushTicker.C:
@@ -152,19 +157,30 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 // handleTakeoff ищет следующий полет и бронирует его транзакцией.
 func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 	var rec FlightRecord
+	var _id int // Системный суррогатный ключ (из YAML контракта)
 	var _status string
 	var _start, _dur sql.NullString
 
-	query := `SELECT * FROM flights WHERE unit_number = ? AND status = 'PENDING' ORDER BY time_cycles ASC LIMIT 1`
+	// Используем точное перечисление колонок во избежание проблем с SELECT * при добавлении новых колонок
+	query := `SELECT 
+		id, status, flight_start_time, target_duration_sec,
+		unit_number, time_cycles, op_setting_1, op_setting_2, op_setting_3,
+		T2, T24, T30, T50, P2, P15, P30, Nf, Nc, epr, Ps30, phi, NRf, NRc,
+		BPR, farB, htBleed, Nf_dmd, PCNfR_dmd, W31, W32
+		FROM flights 
+		WHERE unit_number = ? AND status = 'PENDING' 
+		ORDER BY time_cycles ASC LIMIT 1`
+
 	row := d.db.QueryRow(query, req.UnitNumber)
 
+	// Сканируем результаты строго в соответствии с автосгенерированной структурой FlightRecord
 	err := row.Scan(
-		&_status, &_start, &_dur, // 3 системные
-		&rec.UnitNumber, &rec.TimeCycles, // 2 идентификатора
-		&rec.OpSetting1, &rec.OpSetting2, &rec.OpSetting3, // 3 настройки
-		&rec.T2, &rec.T24, &rec.T30, &rec.T50, &rec.P2, &rec.P15, &rec.P30, // Датчики 1
-		&rec.Nf, &rec.Nc, &rec.Epr, &rec.Ps30, &rec.Phi, &rec.NRf, &rec.NRc, // Датчики 2
-		&rec.BPR, &rec.FarB, &rec.HtBleed, &rec.Nf_dmd, &rec.PCNfR_dmd, &rec.W31, &rec.W32, // Датчики 3
+		&_id, &_status, &_start, &_dur, // 4 системные колонки
+		&rec.UnitNumber, &rec.TimeCycles,
+		&rec.OpSetting1, &rec.OpSetting2, &rec.OpSetting3,
+		&rec.T2, &rec.T24, &rec.T30, &rec.T50, &rec.P2, &rec.P15, &rec.P30,
+		&rec.Nf, &rec.Nc, &rec.Epr, &rec.Ps30, &rec.Phi, &rec.Nrf, &rec.Nrc,
+		&rec.Bpr, &rec.Farb, &rec.Htbleed, &rec.NfDmd, &rec.PcnfrDmd, &rec.W31, &rec.W32,
 	)
 
 	if err == sql.ErrNoRows {
@@ -180,7 +196,7 @@ func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 
 	var startTime time.Time
 
-	// 🚨 ПАРАНОЙЯ L5: Машина состояний времени. NEW
+	// Машина состояний времени (Watermarking anchor)
 	if d.config.SimulationMode == "REALTIME" {
 		startTime = time.Now().UTC()
 	} else {
@@ -190,28 +206,31 @@ func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 		}
 		idleSec := rand.IntN(d.config.IdleMaxSec-d.config.IdleMinSec+1) + d.config.IdleMinSec
 		startTime = lastTime.Add(time.Duration(idleSec) * time.Second)
+		// Сохраняем время окончания этого полета как якорь для следующего
 		d.unitClocks[req.UnitNumber] = startTime.Add(time.Duration(durationSec) * time.Second)
 	}
 
 	startTimeStr := startTime.Format(time.RFC3339)
 
-	updateQ := `UPDATE flights SET status = 'IN_FLIGHT', flight_start_time = ?, target_duration_sec = ? WHERE unit_number = ? AND time_cycles = ?`
-	_, err = d.db.Exec(updateQ, startTimeStr, durationSec, rec.UnitNumber, rec.TimeCycles)
+	// Бронируем рейс (чтобы другая горутина его не забрала)
+	updateQ := `UPDATE flights SET status = 'IN_FLIGHT', flight_start_time = ?, target_duration_sec = ? WHERE id = ?`
+	_, err = d.db.Exec(updateQ, startTimeStr, durationSec, _id)
 	if err != nil {
-		log.Printf("[DISPATCHER] Ошибка бронирования рейса Unit-%d: %v", req.UnitNumber, err)
-		req.RespChan <- TakeoffResponse{HasMoreFlights: false} // <-- Отменяем старт для воркера
-		return // <-- Обязательно прерываем функцию, иначе воркер получит данные, но рейс не будет забронирован, что приведет к коллизиям и неконсистентности данных.
+		log.Printf("[DISPATCHER] Ошибка бронирования рейса Unit-%d (ID:%d): %v", req.UnitNumber, _id, err)
+		req.RespChan <- TakeoffResponse{HasMoreFlights: false} // Отменяем старт для воркера
+		return
 	}
 
+	// Выдаем "Разрешение на взлет" борту
 	req.RespChan <- TakeoffResponse{
 		HasMoreFlights:    true,
-		Record:            rec,
+		Record:            rec, // Базовая физика из контракта
 		StartTime:         startTime,
 		TargetDurationSec: durationSec,
 	}
 }
 
-// flushLandings делает массовый UPDATE (Батчинг) для спасения диска Asus.
+// flushLandings делает массовый UPDATE (Батчинг) для экономии IOPS на слабом SSD.
 func (d *Dispatcher) flushLandings(batch []LandingReport) {
 	tx, err := d.db.Begin()
 	if err != nil {
