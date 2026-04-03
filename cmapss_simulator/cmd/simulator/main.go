@@ -7,11 +7,14 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"cmapss_simulator/internal/chaos"
 	"cmapss_simulator/internal/database"
+	"cmapss_simulator/internal/domain" // Внедрение Подвала
 	"cmapss_simulator/internal/flight"
 	"cmapss_simulator/internal/ui"
 
@@ -41,6 +44,16 @@ func getEnvAsInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// BlackholeBroker — заглушка для тестирования ACARS-штормов в памяти без реальной Kafka.
+// Он молча поглощает ARINC-кадры, позволяя Обезьянам (Chaos Monkeys)
+// симулировать перегрузку буферов и задержки.
+// 🚨 ИНВЕРСИЯ ЗАВИСИМОСТЕЙ: Используем domain.ARINCFrame вместо flight.ARINCFrame
+type BlackholeBroker struct{}
+
+func (b *BlackholeBroker) Transmit(ctx context.Context, frame domain.ARINCFrame) error {
+	return nil // Съедает пакет, как черная дыра
 }
 
 func main() {
@@ -84,15 +97,6 @@ func main() {
 		dispCfg.DBPath = "data/blueprints.sqlite"
 	}
 
-	// Настройка параметров Пилотов (Edge Devices)
-	workerCfg := flight.WorkerConfig{
-		SimulationMode: dispCfg.SimulationMode,
-		TargetHz:       getEnvAsInt("TARGET_HZ", 100),
-		Compression:    getEnvAsInt("COMPRESSION_LEVEL", 1),
-		OutputDir:      os.Getenv("DATA_OUTPUT_DIR"),
-		RunID:          runID,
-	}
-
 	// --- ШАГ 2: INITIALIZATION (Сборка компонентов) ---
 	dispatcher, err := database.NewDispatcher(dispCfg)
 	if err != nil {
@@ -100,13 +104,49 @@ func main() {
 		pterm.Fatal.Printf("Ошибка запуска Диспетчера: %v\n", err)
 	}
 
-	metrics := &flight.SharedMetrics{}
+	// 🌋 ИНТЕГРАЦИЯ ХАОСА (MORGOTH'S FORGE) 🌋
+	// Читаем профиль хаоса из .env.
+	chaosProfile := os.Getenv("CHAOS_PROFILE")
 
+	// В будущем BlackholeBroker будет заменен на реальный Kafka Producer.
+	baseBroker := &BlackholeBroker{}
+
+	// Выковываем сборку хаоса (Обезьяны оборачивают базовый брокер)
+	chaosAssembler := chaos.BuildChaosRealm(chaosProfile, baseBroker, dispatcher.GetDB())
+
+	// Настройка параметров Пилотов (Edge Devices) с инъекцией зависимостей Хаоса
+	workerCfg := flight.WorkerConfig{
+		SimulationMode:   dispCfg.SimulationMode,
+		TargetHz:         getEnvAsInt("TARGET_HZ", 100),
+		Compression:      getEnvAsInt("COMPRESSION_LEVEL", 1),
+		OutputDir:        os.Getenv("DATA_OUTPUT_DIR"),
+		RunID:            runID,
+		SatcomBroker:     chaosAssembler.SatcomBroker,     // Декорированный брокер связи
+		PhysicalInjector: chaosAssembler.PhysicalInjector, // Инъектор разрушения датчиков
+		QarInterceptor:   chaosAssembler.QarInterceptor,   // Блокировщик записи на SSD (Zstd-Бомба)
+	}
+
+	// Если активирована Океаническая Тень (Oceanic Blackout) — оборачиваем каналы Диспетчера.
+	if strings.Contains(chaosProfile, "ocean_blackout") || chaosProfile == "BALROGS" || chaosProfile == "APOCALYPSE" {
+		// Оборачиваем Диспетчера Обезьяной, вероятность блэкаута 1%, изоляция на 5 минут.
+		blackoutMonkey := chaos.NewOceanicBlackoutMonkey(dispatcher, 0.01, 5*time.Minute)
+		// Подменяем каналы в Диспетчере так, чтобы Пилоты общались с Обезьяной, а не с БД.
+		dispatcher.TakeoffChan = blackoutMonkey.TakeoffChan
+		dispatcher.LandingChan = blackoutMonkey.LandingChan
+	}
+
+	// Если активирован Парадокс Ремонта (Zombie State) — внедряем хук в метод сброса логов.
+	if chaosAssembler.LandingInterceptor != nil {
+		dispatcher.SetLandingInterceptor(chaosAssembler.LandingInterceptor)
+	}
+
+	metrics := &flight.SharedMetrics{}
+	
 	// 🚨 ПАРАНОЙЯ L2 (Context Separation):
 	// rootCtx — управляет жизненным циклом инфраструктуры (Диспетчер, TUI).
 	// workerCtx — управляет только активными полетами.
-	rootCtx, cancelRoot := context.WithCancel(context.Background()) // это капитан и радист (Диспетчер БД)
-	workerCtx, cancelWorkers := context.WithCancel(context.Background()) // это матросы (Пилоты)
+	rootCtx, cancelRoot := context.WithCancel(context.Background()) 
+	workerCtx, cancelWorkers := context.WithCancel(context.Background()) 
 	wg := &sync.WaitGroup{}
 
 	// --- ШАГ 3: EXECUTION (Запуск завода) ---
