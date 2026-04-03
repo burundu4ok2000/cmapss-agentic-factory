@@ -15,17 +15,17 @@ import (
 
 // ==============================================================================
 // ДИСПЕТЧЕР ВОЗДУШНОГО ДВИЖЕНИЯ (State Orchestrator)
-// AI-Ready: Lock-Free архитектура (CSP), Batch-оптимизация I/O, Защита от OOM.
-// Опирается на автосгенерированные контракты (schema_generated.go).
+// AI-Ready: Lock-Free архитектура (CSP), Batch-оптимизация I/O.
+// Интеграция с Chaos Engineering (Zombie State Attack).
 // ==============================================================================
 
 // DispatcherConfig — структура для чистой передачи настроек.
 type DispatcherConfig struct {
 	DBPath          string
-	SimulationMode  string // "REALTIME" или "ACCELERATED"
+	SimulationMode  string 
 	MinDurationSec  int
 	MaxDurationSec  int
-	IdleMinSec      int // Имитация простоя на земле (Turnaround time)
+	IdleMinSec      int 
 	IdleMaxSec      int 
 	AnchorTime      time.Time
 	BatchSize       int
@@ -38,27 +38,18 @@ type Dispatcher struct {
 	TakeoffChan chan TakeoffRequest
 	LandingChan chan LandingReport
 	config      DispatcherConfig
-
-	// unitClocks: Логические часы двигателей для режима ACCELERATED.
-	// Гарантируют непрерывность времени между полетами без коллизий.
-	unitClocks map[int32]time.Time
-
-	wg sync.WaitGroup // Счетчик активных горутин Диспетчера
+	unitClocks  map[int32]time.Time
+	wg          sync.WaitGroup
+	
+	// flushInterceptor позволяет Хаос-Обезьянам перехватывать процесс сброса 
+	// логов на диск (например, для атаки Zombie State).
+	flushInterceptor func(batch []LandingReport)
 }
 
-// NewDispatcher подключается к БД, валидирует конфигурацию и делает Recovery.
 func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	// 🚨 ПАРАНОЙЯ L1: Sanity Check конфига
 	if cfg.MinDurationSec <= 0 || cfg.MaxDurationSec <= 0 || cfg.MinDurationSec > cfg.MaxDurationSec {
-		return nil, fmt.Errorf("FATAL: Невалидные тайминги полета (min=%d, max=%d)", cfg.MinDurationSec, cfg.MaxDurationSec)
-	}
-
-	if cfg.IdleMinSec < 0 || cfg.IdleMaxSec < 0 || cfg.IdleMinSec > cfg.IdleMaxSec {
-		return nil, fmt.Errorf("FATAL: Невалидные тайминги простоя (min=%d, max=%d)", cfg.IdleMinSec, cfg.IdleMaxSec)
-	}
-
-	if cfg.BatchSize <= 0 || cfg.FlushIntervalMs <= 0 {
-		return nil, fmt.Errorf("FATAL: Невалидные настройки батчинга (size=%d, interval=%d)", cfg.BatchSize, cfg.FlushIntervalMs)
+		return nil, fmt.Errorf("FATAL: Невалидные тайминги полета")
 	}
 
 	db, err := sql.Open("sqlite", cfg.DBPath)
@@ -91,16 +82,37 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		log.Printf("[DISPATCHER] Внимание: Выполнено восстановление %d прерванных рейсов обратно в PENDING.", rowsAffected)
 	}
 
-	return &Dispatcher{
+	d := &Dispatcher{
 		db:          db,
 		TakeoffChan: make(chan TakeoffRequest, cfg.BatchSize),
 		LandingChan: make(chan LandingReport, cfg.BatchSize),
 		config:      cfg,
 		unitClocks:  make(map[int32]time.Time),
-	}, nil
+	}
+	
+	// По умолчанию интерцептор просто вызывает базовый метод записи
+	d.flushInterceptor = d.defaultFlushLandings
+
+	return d, nil
 }
 
-// Start запускает Event Loop в фоновой горутине.
+// GetDB возвращает указатель на БД для Оркестратора Хаоса (Zombie State Attack).
+func (d *Dispatcher) GetDB() *sql.DB {
+	return d.db
+}
+
+// SetLandingInterceptor позволяет внедрить Middleware для саботажа процесса посадки.
+// Это инъекция хаоса уровня "Sauron" (CMMS Split Brain).
+func (d *Dispatcher) SetLandingInterceptor(interceptor func(context.Context, LandingReport, func(context.Context, []LandingReport))) {
+	d.flushInterceptor = func(batch []LandingReport) {
+		for _, rep := range batch {
+			interceptor(context.Background(), rep, func(ctx context.Context, r []LandingReport) {
+				d.defaultFlushLandings(r)
+			})
+		}
+	}
+}
+
 func (d *Dispatcher) Start(ctx context.Context) {
 	d.wg.Add(1)
 	go func() {
@@ -129,7 +141,7 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 		case <-ctx.Done():
 			// 🚨 ПАРАНОЙЯ L5: Graceful Shutdown
 			if len(landingBatch) > 0 {
-				d.flushLandings(landingBatch)
+				d.flushInterceptor(landingBatch)
 			}
 			d.db.Close()
 			log.Println("[DISPATCHER] Остановлен. БД безопасно закрыта.")
@@ -141,13 +153,13 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 		case report := <-d.LandingChan:
 			landingBatch = append(landingBatch, report)
 			if len(landingBatch) >= d.config.BatchSize {
-				d.flushLandings(landingBatch)
-				landingBatch = landingBatch[:0] // Очистка среза без переаллокации
+				d.flushInterceptor(landingBatch)
+				landingBatch = landingBatch[:0]
 			}
 
 		case <-flushTicker.C:
 			if len(landingBatch) > 0 {
-				d.flushLandings(landingBatch)
+				d.flushInterceptor(landingBatch)
 				landingBatch = landingBatch[:0]
 			}
 		}
@@ -157,7 +169,7 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 // handleTakeoff ищет следующий полет и бронирует его транзакцией.
 func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 	var rec FlightRecord
-	var _id int // Системный суррогатный ключ (из YAML контракта)
+	var _id int 
 	var _status string
 	var _start, _dur sql.NullString
 
@@ -175,7 +187,7 @@ func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 
 	// Сканируем результаты строго в соответствии с автосгенерированной структурой FlightRecord
 	err := row.Scan(
-		&_id, &_status, &_start, &_dur, // 4 системные колонки
+		&_id, &_status, &_start, &_dur,
 		&rec.UnitNumber, &rec.TimeCycles,
 		&rec.OpSetting1, &rec.OpSetting2, &rec.OpSetting3,
 		&rec.T2, &rec.T24, &rec.T30, &rec.T50, &rec.P2, &rec.P15, &rec.P30,
@@ -217,21 +229,21 @@ func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 	_, err = d.db.Exec(updateQ, startTimeStr, durationSec, _id)
 	if err != nil {
 		log.Printf("[DISPATCHER] Ошибка бронирования рейса Unit-%d (ID:%d): %v", req.UnitNumber, _id, err)
-		req.RespChan <- TakeoffResponse{HasMoreFlights: false} // Отменяем старт для воркера
+		req.RespChan <- TakeoffResponse{HasMoreFlights: false} 
 		return
 	}
 
 	// Выдаем "Разрешение на взлет" борту
 	req.RespChan <- TakeoffResponse{
 		HasMoreFlights:    true,
-		Record:            rec, // Базовая физика из контракта
+		Record:            rec, 
 		StartTime:         startTime,
 		TargetDurationSec: durationSec,
 	}
 }
 
-// flushLandings делает массовый UPDATE (Батчинг) для экономии IOPS на слабом SSD.
-func (d *Dispatcher) flushLandings(batch []LandingReport) {
+// defaultFlushLandings — оригинальная логика сброса логов (без хаоса).
+func (d *Dispatcher) defaultFlushLandings(batch []LandingReport) {
 	tx, err := d.db.Begin()
 	if err != nil {
 		log.Printf("[DISPATCHER] Ошибка старта транзакции батча: %v", err)

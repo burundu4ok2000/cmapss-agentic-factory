@@ -12,21 +12,20 @@ import (
 
 // ==============================================================================
 // PHYSICS SIMULATOR ORCHESTRATOR (Memory Shield & Data Governance)
-// AI-Ready Standard: 
+// AI-Ready Standard:
 // 1. Инкапсулирует сложную логику управления C-памятью (Reference Counting Arrow).
 // 2. Осуществляет семантическую маршрутизацию данных (Legal Hold).
+// 3. ZERO DEPENDENCIES от слоя Chaos (Strict DAG architecture).
 // ==============================================================================
 
-// SimulatorConfig передается из основной точки входа для управления Фазой 4.
+// SimulatorConfig передается из основной точки входа для управления сохранением.
 type SimulatorConfig struct {
 	TargetHz         int
 	CompressionLevel int
 	DataOutputDir    string
 }
 
-// SimulateAndSave — единая точка входа для горутины-Слота.
-// 🚨 ПАРАНОЙЯ L1 (Signature Update): Внедрен параметр flightStatus 
-// ("COMPLETED", "INTERRUPTED", "FAILED") для маршрутизации аномалий в Quarantine.
+// SimulateAndSave — единая точка входа для горутины-Слота (Пилота).
 func SimulateAndSave(rec database.FlightRecord, startTime time.Time, durationSec int, runID string, flightStatus string, cfg SimulatorConfig) error {
 	totalRows := durationSec * cfg.TargetHz
 
@@ -47,7 +46,9 @@ func SimulateAndSave(rec database.FlightRecord, startTime time.Time, durationSec
 	defer rb.Release()
 
 	// 2. Симуляция Физики (Наполнение памяти)
-	err := GenerateTelemetry(rb.GetBuilder(), rec, startTime, durationSec, cfg.TargetHz, runID)
+	// ВНИМАНИЕ: Мы передаем nil вместо chaosInjector, потому что инъекция 
+	// мутаций в физику происходит через worker.go -> engine.go (Инверсия зависимостей).
+	err := GenerateTelemetry(rb.GetBuilder(), rec, startTime, durationSec, cfg.TargetHz, runID, nil)
 	if err != nil {
 		return fmt.Errorf("сбой физического движка: %w", err)
 	}
