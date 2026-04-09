@@ -64,13 +64,17 @@ def main():
 
     # Logging function for corrupted rows (used in foreachBatch)
     def process_batch(batch_df, batch_id):
-        corrupted_count = batch_df.filter(F.col("is_corrupted") == True).count()
+        # Add processing metadata
+        processed_batch = batch_df.withColumn("processing_date", F.to_date(F.current_timestamp()))
+        
+        corrupted_count = processed_batch.filter(F.col("is_corrupted") == True).count()
         if corrupted_count > 0:
             logger.warning(f"Batch {batch_id}: Detected {corrupted_count} corrupted rows (Morgoth Attack blocked)!")
         
-        # Write to GCS (Parquet)
-        batch_df.write \
+        # Write to GCS (Parquet) with logical partitioning
+        processed_batch.write \
             .format("parquet") \
+            .partitionBy("processing_date", "unit_number") \
             .mode("append") \
             .save(OUTPUT_PATH)
 

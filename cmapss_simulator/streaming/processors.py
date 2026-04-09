@@ -5,7 +5,7 @@ from pyspark.sql.types import ArrayType, StringType
 class TelemetryShield:
     """
     Principal 'Immune System' for CMAPSS data pipeline.
-    Advanced physics-aware and statistical defense layers against Morgoth's attacks.
+    Advanced physics-aware, statistical, and SLA defense layers.
     """
 
     @staticmethod
@@ -47,8 +47,6 @@ class TelemetryShield:
         Attack 3: Time Drift.
         Rejection of spoofed historical data (>1h old).
         """
-        # Note: We filter these out completely rather than flagging, 
-        # as they break time-series consistency.
         one_hour_ago = F.current_timestamp() - F.expr("INTERVAL 1 HOUR")
         return df.filter(F.col("timestamp") >= one_hour_ago)
 
@@ -56,8 +54,7 @@ class TelemetryShield:
     def anti_out_of_bounds(df: DataFrame) -> DataFrame:
         """
         Attack 4: Thermocouple Break.
-        Physics check: Exhaust Gas Temp (T50) cannot be lower than Inlet Temp (T2) 
-        during active operation (>2000 RPM).
+        Physics check: T50 cannot be lower than T2 during active operation.
         """
         is_break = (F.col("T50") < F.col("T2")) & (F.col("Nf") > 2000)
         
@@ -74,6 +71,25 @@ class TelemetryShield:
         )
 
     @staticmethod
+    def anti_sla_breach(df: DataFrame) -> DataFrame:
+        """
+        Attack 5: DSP Throttling.
+        Detects artificial delays in message processing exceeding 5 minutes.
+        """
+        # Calculate latency in seconds
+        latency = F.unix_timestamp(F.current_timestamp()) - F.unix_timestamp(F.col("timestamp"))
+        is_sla_violation = latency > 300 # 5 minutes
+        
+        return df.withColumn(
+            "corruption_reason",
+            F.when(is_sla_violation, F.array_union(F.col("corruption_reason"), F.array(F.lit("SLA_VIOLATION"))))
+             .otherwise(F.col("corruption_reason"))
+        ).withColumn(
+            "is_corrupted",
+            F.when(is_sla_violation, F.lit(True)).otherwise(F.col("is_corrupted"))
+        )
+
+    @staticmethod
     def anti_sensor_freeze(df: DataFrame) -> DataFrame:
         """
         Attack 6: Sensor Freeze (P30 Icing).
@@ -81,7 +97,6 @@ class TelemetryShield:
         """
         window = Window.partitionBy("unit_number").orderBy("timestamp")
         
-        # Look back 4 steps (total 5 consecutive identical values)
         p30_lag1 = F.lag("P30", 1).over(window)
         p30_lag2 = F.lag("P30", 2).over(window)
         p30_lag3 = F.lag("P30", 3).over(window)
@@ -89,7 +104,6 @@ class TelemetryShield:
         
         nc_lag4 = F.lag("Nc", 4).over(window)
         
-        # Condition: P30 hasn't moved, but Nc (Core RPM) has
         is_frozen = (F.col("P30") == p30_lag1) & \
                     (F.col("P30") == p30_lag2) & \
                     (F.col("P30") == p30_lag3) & \
@@ -111,16 +125,14 @@ class TelemetryShield:
     @staticmethod
     def anti_adversarial_drift(df: DataFrame) -> DataFrame:
         """
-        Attack 9: Adversarial Drift (Stuxnet-style).
+        Attack 9: Adversarial Drift.
         Detects inverse correlation between Fuel Flow (phi) and T50.
-        Normally, delta_phi > 0 implies delta_T50 > 0.
         """
         window = Window.partitionBy("unit_number").orderBy("timestamp")
         
         phi_lag1 = F.lag("phi", 1).over(window)
         t50_lag1 = F.lag("T50", 1).over(window)
         
-        # phi is increasing, but T50 is decreasing
         is_drift = (F.col("phi") > phi_lag1) & (F.col("T50") < t50_lag1)
         
         return df.withColumn(
@@ -132,29 +144,49 @@ class TelemetryShield:
             F.when(is_drift, F.lit(True)).otherwise(F.col("is_corrupted"))
         )
 
+    @staticmethod
+    def anti_zombie_state(df: DataFrame) -> DataFrame:
+        """
+        Attack 10: Zombie State (IT/OT Split Brain).
+        Ensures that 'time_cycles' strictly increases for each unit_number.
+        """
+        window = Window.partitionBy("unit_number").orderBy("timestamp")
+        prev_cycles = F.lag("time_cycles", 1).over(window)
+        
+        is_zombie = (F.col("time_cycles") < prev_cycles)
+        
+        return df.withColumn(
+            "corruption_reason",
+            F.when(is_zombie, F.array_union(F.col("corruption_reason"), F.array(F.lit("ZOMBIE_STATE_DETECTED"))))
+             .otherwise(F.col("corruption_reason"))
+        ).withColumn(
+            "is_corrupted",
+            F.when(is_zombie, F.lit(True)).otherwise(F.col("is_corrupted"))
+        )
+
     def apply(self, df: DataFrame) -> DataFrame:
         """
-        Orchestrates the sequential application of the Immune System filters.
-        Optimized for Spark Stateful Streaming.
+        Orchestrates the 'Immune System' protection pipeline.
         """
-        # Ensure base columns for tracking corruption exist
+        # Initialization
         if "is_corrupted" not in df.columns:
             df = df.withColumn("is_corrupted", F.lit(False))
         if "corruption_reason" not in df.columns:
             df = df.withColumn("corruption_reason", F.array().cast("array<string>"))
             
-        # 1. Network & Time Layers
+        # 1. Transport & Timing Layer
         df = self.anti_network_burst(df)
         df = self.anti_time_drift(df)
+        df = self.anti_sla_breach(df)
         
-        # 2. Schema Layer
+        # 2. Integrity & Schema Layer
         df = self.anti_schema_rot(df)
+        df = self.anti_zombie_state(df)
         
         # 3. Physics & Advanced layers
         df = self.anti_out_of_bounds(df)
         df = self.anti_sensor_freeze(df)
         
-        # Handle 'phi' gracefully if missing (legacy support)
         if "phi" in df.columns:
             df = self.anti_adversarial_drift(df)
         
