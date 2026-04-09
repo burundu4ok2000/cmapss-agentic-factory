@@ -15,9 +15,40 @@ import (
 	"cmapss_simulator/internal/flight"
 	"cmapss_simulator/internal/ui"
 
+	"encoding/json"
+	"strings"
+
 	"github.com/joho/godotenv"
 	"github.com/pterm/pterm"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+// KafkaBroker — реализация StreamBroker для Stage 3.
+type KafkaBroker struct {
+	client *kgo.Client
+	topic  string
+}
+
+func (k *KafkaBroker) Transmit(ctx context.Context, data interface{}) error {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal kafka payload: %w", err)
+	}
+
+	// Асинхронная отправка (Fire-and-forget для MVP)
+	k.client.Produce(ctx, &kgo.Record{
+		Topic: k.topic,
+		Value: payload,
+	}, nil)
+
+	return nil
+}
+
+func (k *KafkaBroker) Close() {
+	if k.client != nil {
+		k.client.Close()
+	}
+}
 
 // getEnvAsInt — хелпер для безопасного парсинга .env
 func getEnvAsInt(key string, fallback int) int {
@@ -83,7 +114,27 @@ func main() {
 		workerCfg.OutputDir = "data/telemetry"
 	}
 
-	// 2. INITIALIZATION
+	// 2. KAFKA INITIALIZATION
+	brokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
+	if len(brokers) == 0 || brokers[0] == "" {
+		brokers = []string{"localhost:9092"}
+	}
+	
+	kClient, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.AllowAutoTopicCreation(),
+	)
+	
+	var satcom flight.StreamBroker
+	if err != nil {
+		pterm.Warning.Printf("Сбой подключения к Kafka: %v. Режим Blackout.\n", err)
+	} else {
+		satcom = &KafkaBroker{client: kClient, topic: "engine_telemetry"}
+		defer kClient.Close()
+	}
+	workerCfg.SatcomBroker = satcom
+
+	// 3. STORAGE INITIALIZATION
 	dispatcher, err := database.NewDispatcher(dispCfg)
 	if err != nil {
 		pterm.Fatal.Printf("Ошибка запуска Диспетчера: %v\n", err)

@@ -18,7 +18,7 @@ type SimulatorConfig struct {
 
 // SimulateAndSave — единая точка входа для горутины-Слота.
 // AI-Ready: Инкапсулирует сложную логику управления памятью (Reference Counting Arrow) и I/O.
-func SimulateAndSave(rec database.FlightRecord, startTime time.Time, durationSec int, runID string, cfg SimulatorConfig) error {
+func SimulateAndSave(rec database.FlightRecord, startTime time.Time, durationSec int, runID string, cfg SimulatorConfig, transmit func(interface{})) error {
 	totalRows := durationSec * cfg.TargetHz
 
 	// 1. Инициализация Памяти
@@ -27,7 +27,7 @@ func SimulateAndSave(rec database.FlightRecord, startTime time.Time, durationSec
 	defer rb.Release() // 🚨 ПАРАНОЙЯ: Очистка C-аллокатора при любом исходе функции.
 
 	// 2. Симуляция Физики (Наполнение памяти)
-	err := GenerateTelemetry(rb.GetBuilder(), rec, startTime, durationSec, cfg.TargetHz, runID)
+	err := GenerateTelemetry(rb.GetBuilder(), rec, startTime, durationSec, cfg.TargetHz, runID, transmit)
 	if err != nil {
 		return fmt.Errorf("сбой физического движка: %w", err)
 	}

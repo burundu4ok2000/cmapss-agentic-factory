@@ -10,8 +10,10 @@ import (
 	"cmapss_simulator/internal/physics"
 )
 
-// StreamBroker — пустой интерфейс-заглушка (Hook) для реализации Этапа 3 в будущем (Redpanda/Kafka).
-type StreamBroker interface{}
+// StreamBroker — интерфейс для реализации Stage 3 (Redpanda/Kafka).
+type StreamBroker interface {
+	Transmit(ctx context.Context, data interface{}) error
+}
 
 // WorkerConfig передается каждому пилоту при старте.
 type WorkerConfig struct {
@@ -20,6 +22,7 @@ type WorkerConfig struct {
 	Compression    int
 	OutputDir      string
 	RunID          string
+	SatcomBroker   StreamBroker // Канал связи с землей (Kafka)
 }
 
 // Pilot — автономная горутина, управляющая жизненным циклом одной турбины.
@@ -75,9 +78,15 @@ func Pilot(unitID int32, ctx context.Context, wg *sync.WaitGroup, d *database.Di
 		}
 
 		// 🚨 ПАРАНОЙЯ L3 (Машина Состояний Времени)
+		trans := func(data interface{}) {
+			if cfg.SatcomBroker != nil {
+				_ = cfg.SatcomBroker.Transmit(ctx, data)
+			}
+		}
+
 		if cfg.SimulationMode == "ACCELERATED" {
 			// Ускоренный режим: Не спим, сразу генерируем Parquet.
-			err := physics.SimulateAndSave(resp.Record, resp.StartTime, resp.TargetDurationSec, cfg.RunID, simCfg)
+			err := physics.SimulateAndSave(resp.Record, resp.StartTime, resp.TargetDurationSec, cfg.RunID, simCfg, trans)
 			
 			status := "COMPLETED"
 			if err != nil {
@@ -103,7 +112,7 @@ func Pilot(unitID int32, ctx context.Context, wg *sync.WaitGroup, d *database.Di
 				
 				// Если самолет успел пролететь хотя бы 1 секунду — сохраняем улики
 				if actualSec > 0 {
-					_ = physics.SimulateAndSave(resp.Record, resp.StartTime, actualSec, cfg.RunID, simCfg)
+					_ = physics.SimulateAndSave(resp.Record, resp.StartTime, actualSec, cfg.RunID, simCfg, trans)
 					sendSafeReport(ctx, d, unitID, resp.Record.TimeCycles, "INTERRUPTED") // заменил context.Background() на ctx
 					m.FilesSaved.Add(1)
 				}
@@ -111,7 +120,7 @@ func Pilot(unitID int32, ctx context.Context, wg *sync.WaitGroup, d *database.Di
 
 			case <-timer.C:
 				// Нормальное завершение полета
-				err := physics.SimulateAndSave(resp.Record, resp.StartTime, resp.TargetDurationSec, cfg.RunID, simCfg)
+				err := physics.SimulateAndSave(resp.Record, resp.StartTime, resp.TargetDurationSec, cfg.RunID, simCfg, trans)
 				status := "COMPLETED"
 				if err != nil {
 					status = "FAILED"
