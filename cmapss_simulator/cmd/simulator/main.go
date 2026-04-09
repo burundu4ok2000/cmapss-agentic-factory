@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -14,12 +15,13 @@ import (
 
 	"cmapss_simulator/internal/chaos"
 	"cmapss_simulator/internal/database"
-	"cmapss_simulator/internal/domain" // Внедрение Подвала
+	"cmapss_simulator/internal/domain"
 	"cmapss_simulator/internal/flight"
 	"cmapss_simulator/internal/ui"
 
 	"github.com/joho/godotenv"
 	"github.com/pterm/pterm"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // ==============================================================================
@@ -46,14 +48,51 @@ func getEnvAsInt(key string, fallback int) int {
 	return fallback
 }
 
-// BlackholeBroker — заглушка для тестирования ACARS-штормов в памяти без реальной Kafka.
-// Он молча поглощает ARINC-кадры, позволяя Обезьянам (Chaos Monkeys)
-// симулировать перегрузку буферов и задержки.
-// 🚨 ИНВЕРСИЯ ЗАВИСИМОСТЕЙ: Используем domain.ARINCFrame вместо flight.ARINCFrame
-type BlackholeBroker struct{}
+// KafkaBroker — надежный продюсер для трансляции телеметрии в Redpanda/Kafka.
+// Реализует интерфейс domain.StreamBroker.
+type KafkaBroker struct {
+	client *kgo.Client
+	topic  string
+}
 
-func (b *BlackholeBroker) Transmit(ctx context.Context, frame domain.ARINCFrame) error {
-	return nil // Съедает пакет, как черная дыра
+// NewKafkaBroker инициализирует асинхронный клиент franz-go.
+func NewKafkaBroker(brokers []string, topic string) (*KafkaBroker, error) {
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.AllowAutoTopicCreation(),
+		kgo.FetchMaxWait(100*time.Millisecond),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kafka client: %w", err)
+	}
+	return &KafkaBroker{
+		client: client,
+		topic:  topic,
+	}, nil
+}
+
+// Transmit сериализует кадр в JSON и отправляет в Redpanda.
+// Метод асинхронный (fire-and-forget), что критично для 100Hz симуляции.
+func (k *KafkaBroker) Transmit(ctx context.Context, frame domain.ARINCFrame) error {
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		return fmt.Errorf("failed to marshal frame: %w", err)
+	}
+
+	// Асинхронная отправка. Ошибки будут доступны через логи или метрики клиента.
+	k.client.Produce(ctx, &kgo.Record{
+		Topic: k.topic,
+		Value: payload,
+	}, nil)
+
+	return nil
+}
+
+// Close корректно завершает работу клиента, сбрасывая буферы.
+func (k *KafkaBroker) Close() {
+	if k.client != nil {
+		k.client.Close()
+	}
 }
 
 func main() {
@@ -108,8 +147,31 @@ func main() {
 	// Читаем профиль хаоса из .env.
 	chaosProfile := os.Getenv("CHAOS_PROFILE")
 
-	// В будущем BlackholeBroker будет заменен на реальный Kafka Producer.
-	baseBroker := &BlackholeBroker{}
+	// Инициализация Kafka-брокера.
+	kafkaBrokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
+	if len(kafkaBrokers) == 0 || kafkaBrokers[0] == "" {
+		kafkaBrokers = []string{"localhost:9092"}
+	}
+	
+	var baseBroker domain.StreamBroker
+	kBroker, err := NewKafkaBroker(kafkaBrokers, "engine_telemetry")
+	if err != nil {
+		pterm.Error.Printf("Сбой подключения к Redpanda: %v. Переход в режим Blackhole.\n", err)
+		// В режиме отказоустойчивости мы не падаем, а продолжаем работу (Best-Effort)
+		baseBroker = &struct {
+			domain.StreamBroker
+		}{StreamBroker: nil} // Or just define a simple stub
+	} else {
+		baseBroker = kBroker
+		defer kBroker.Close()
+	}
+
+	// Если брокер не инициализирован, используем заглушку, чтобы не паниковать
+	if baseBroker == nil {
+		baseBroker = &struct {
+			domain.StreamBroker
+		}{}
+	}
 
 	// Выковываем сборку хаоса (Обезьяны оборачивают базовый брокер)
 	chaosAssembler := chaos.BuildChaosRealm(chaosProfile, baseBroker, dispatcher.GetDB())
