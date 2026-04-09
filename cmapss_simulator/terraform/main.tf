@@ -39,6 +39,12 @@ resource "google_bigquery_table" "raw_telemetry" {
   external_data_configuration {
     autodetect    = true
     source_format = "PARQUET"
-    source_uris   = ["gs://${google_storage_bucket.datalake.name}/telemetry/*.parquet"]
+    # Pointing to the clean /data/ folder to avoid Spark metadata issues
+    source_uris   = ["gs://${google_storage_bucket.datalake.name}/telemetry/data/*"]
+
+    hive_partitioning_options {
+      source_uri_prefix      = "gs://${google_storage_bucket.datalake.name}/telemetry/data/"
+      require_partition_filter = false
+    }
   }
 }

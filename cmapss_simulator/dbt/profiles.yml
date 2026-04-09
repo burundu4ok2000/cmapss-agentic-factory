@@ -3,7 +3,8 @@ cmapss_go_sim:
   outputs:
     dev:
       type: bigquery
-      method: oauth
+      method: service-account
+      keyfile: /home/donald_trump/.google/credentials/my-credentials.json
       project: de-zoomcamp-2026-485615
       dataset: cmapss_telemetry
       threads: 4
