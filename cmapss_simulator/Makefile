@@ -2,7 +2,7 @@
 # C-MAPSS Factory 4.0: Central Control Hub (Makefile)
 # ==============================================================================
 
-.PHONY: setup infra-up infra-down terraform-apply seed-lake run-pipeline lint help
+.PHONY: setup init-db infra-up infra-down terraform-apply seed-lake run-pipeline lint help
 
 # Default project variables (can be overridden)
 PROJECT_ID ?= de-zoomcamp-2026-485615
@@ -10,6 +10,7 @@ PROJECT_ID ?= de-zoomcamp-2026-485615
 help:
 	@echo "C-MAPSS Agentic Factory 4.0 Management Commands:"
 	@echo "  setup            Install local dependencies (Go, uv, Python)"
+	@echo "  init-db          Initialize SQLite DB (Parses NASA .txt -> blueprints.sqlite)"
 	@echo "  infra-up         Start local infrastructure (Redpanda, Dashboard) via Docker"
 	@echo "  infra-down       Stop all local containers"
 	@echo "  terraform-apply  Deploy GCP resources (GCS, BigQuery)"
@@ -21,6 +22,10 @@ setup:
 	go mod tidy
 	uv pip install -r streaming/requirements.txt
 	uv pip install -r dashboard/requirements.txt
+
+init-db:
+	@echo "Initializing local blueprints.sqlite database..."
+	uv run python3 scripts/init_db.py
 
 infra-up:
 	docker compose up -d
@@ -44,11 +49,13 @@ seed-lake:
 run-pipeline:
 	@echo "----------------------------------------------------------------------"
 	@echo "TO START THE FULL DATA FLOW:"
-	@echo "1. Run the Go Simulator:"
+	@echo "1. Initialize the Local Database (ETL Part):"
+	@echo "   make init-db"
+	@echo "2. Run the Go Simulator:"
 	@echo "   go run cmd/simulator/main.go"
-	@echo "2. In a separate terminal, run the PySpark Stream Processor:"
+	@echo "3. In a separate terminal, run the PySpark Stream Processor:"
 	@echo "   python3 streaming/consumer.py"
-	@echo "3. Visit the Streamlit Dashboard: http://localhost:8501"
+	@echo "4. Visit the Streamlit Dashboard: http://localhost:8501"
 	@echo "----------------------------------------------------------------------"
 
 lint:

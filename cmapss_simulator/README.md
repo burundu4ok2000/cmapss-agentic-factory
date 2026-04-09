@@ -80,6 +80,9 @@ make seed-lake
 
 ### 3. Execution
 ```bash
+# Initialize local Data (Parses NASA .txt files to SQLite)
+make init-db
+
 # Start Redpanda and Streamlit Dashboard
 make infra-up
 
@@ -87,7 +90,7 @@ make infra-up
 go run cmd/simulator/main.go
 
 # Start the Immune System (PySpark)
-python3 streaming/consumer.py
+uv run python3 streaming/consumer.py
 ```
 
 ### 4. Review
