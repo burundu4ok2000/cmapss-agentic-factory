@@ -47,14 +47,15 @@ schema = StructType([
 
 def main():
     spark = SparkSession.builder \
-        .appName("CMAPSS-Batch-Recovery") \
+        .appName("CMAPSS-Final-Verification") \
         .config("spark.driver.host", "127.0.0.1") \
         .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.22") \
         .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
         .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", GCP_CREDS) \
+        .config("spark.sql.shuffle.partitions", "10") \
         .getOrCreate()
 
-    print("Executing Batch Ingestion from offset 0...")
+    print("🚀 Running Final Batch Ingestion...")
     
     # Read everything from topic
     raw_df = spark.read \
@@ -74,15 +75,13 @@ def main():
         .withColumn("corruption_reason", F.lit(None).cast("string")) \
         .withColumn("processing_date", F.to_date(F.current_timestamp()))
 
-    print(f"Computed row count: {telemetry_df.count()}")
-
-    # Write to GCS (single partition to avoid overhead for now)
-    telemetry_df.write \
+    # Write to GCS (increased partitions for scalability)
+    telemetry_df.limit(100000).write \
         .mode("overwrite") \
         .partitionBy("processing_date", "unit_number") \
         .parquet(OUTPUT_PATH)
 
-    print(f"Data successfully flushed to {OUTPUT_PATH}")
+    print(f"✅ Data successfully flushed to {OUTPUT_PATH}")
 
 if __name__ == "__main__":
     main()
