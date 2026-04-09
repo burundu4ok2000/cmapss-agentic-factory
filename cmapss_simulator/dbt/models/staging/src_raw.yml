@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: raw
+    database: de-zoomcamp-2026-485615
+    schema: cmapss_telemetry
+    tables:
+      - name: raw_telemetry

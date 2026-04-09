@@ -1,0 +1,12 @@
+cmapss_go_sim:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: de-zoomcamp-2026-485615
+      dataset: cmapss_telemetry
+      threads: 4
+      timeout_seconds: 300
+      location: US
+      priority: interactive

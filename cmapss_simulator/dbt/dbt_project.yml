@@ -1,8 +1,8 @@
-name: 'cmapss_dbt'
+name: 'cmapss_go_sim'
 version: '1.0.0'
 config-version: 2
 
-profile: 'default'
+profile: 'cmapss_go_sim'
 
 model-paths: ["models"]
 analysis-paths: ["analyses"]
@@ -11,10 +11,14 @@ seed-paths: ["seeds"]
 macro-paths: ["macros"]
 snapshot-paths: ["snapshots"]
 
+target-path: "target"
 clean-targets:
   - "target"
   - "dbt_packages"
 
 models:
-  cmapss_dbt:
-    materialized: table
+  cmapss_go_sim:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

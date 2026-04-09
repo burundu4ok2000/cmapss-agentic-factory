@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: stg_telemetry
+    description: "Refined telemetry data from the Immune System. Only contains non-corrupted records."
+    columns:
+      - name: unit_number
+        description: "Engine Unit ID"
+      - name: time_cycles
+        description: "Operation cycles count"
+      - name: egt_margin
+        description: "Exhaust Gas Temperature Margin (1450 - T50)"
+
+  - name: mart_engine_health
+    description: "Consolidated health metrics for engine monitoring."
+    columns:
+      - name: unit_number
+        description: "Engine Unit ID"
+      - name: event_date
+        description: "The date when the metrics were recorded"
+      - name: t50_moving_avg_10
+        description: "Moving average of T50 sensor for the last 10 cycles"
