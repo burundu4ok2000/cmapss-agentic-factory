@@ -6,7 +6,6 @@ require (
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/joho/godotenv v1.5.1
 	github.com/pterm/pterm v0.12.83
-	github.com/twmb/franz-go v1.20.7
 	modernc.org/sqlite v1.47.0
 )
 
@@ -36,7 +35,6 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/twmb/franz-go/pkg/kmsg v1.12.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect

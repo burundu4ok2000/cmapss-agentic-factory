@@ -13,43 +13,46 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// ==============================================================================
-// ДИСПЕТЧЕР ВОЗДУШНОГО ДВИЖЕНИЯ (State Orchestrator)
-// AI-Ready: Lock-Free архитектура (CSP), Batch-оптимизация I/O.
-// Интеграция с Chaos Engineering (Zombie State Attack).
-// ==============================================================================
-
-// DispatcherConfig — структура для чистой передачи настроек.
+// DispatcherConfig — структура для чистой передачи настроек (избавление от длинных списков аргументов).
 type DispatcherConfig struct {
 	DBPath          string
-	SimulationMode  string 
+	SimulationMode  string // "REALTIME" или "ACCELERATED"
 	MinDurationSec  int
 	MaxDurationSec  int
-	IdleMinSec      int 
-	IdleMaxSec      int 
+	IdleMinSec      int // new: 
+	IdleMaxSec      int // для имитации простоя между полетами
 	AnchorTime      time.Time
 	BatchSize       int
 	FlushIntervalMs int
 }
 
-// Dispatcher — монопольный владелец соединения с SQLite. Оркестрирует I/O без мьютексов.
+// Dispatcher — монопольный владелец SQLite. Оркестрирует конкурентный I/O.
 type Dispatcher struct {
 	db          *sql.DB
 	TakeoffChan chan TakeoffRequest
 	LandingChan chan LandingReport
 	config      DispatcherConfig
+
+	// 🚨 ПАРАНОЙЯ: Логические часы двигателей для режима ACCELERATED.
+	// Гарантируют непрерывность времени между полетами без коллизий.
 	unitClocks  map[int32]time.Time
-	wg          sync.WaitGroup
 	
-	// flushInterceptor позволяет Хаос-Обезьянам перехватывать процесс сброса 
-	// логов на диск (например, для атаки Zombie State).
-	flushInterceptor func(batch []LandingReport)
+	wg          sync.WaitGroup // NEW: Внутренний счетчик Диспетчера
 }
 
+// NewDispatcher подключается к БД, валидирует конфигурацию и делает Recovery.
 func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
-	// 🚨 ПАРАНОЙЯ L1: Sanity Check конфига
+	// 🚨 ПАРАНОЙЯ: Sanity Check (Защита от паники rand.IntN)
 	if cfg.MinDurationSec <= 0 || cfg.MaxDurationSec <= 0 || cfg.MinDurationSec > cfg.MaxDurationSec {
-		return nil, fmt.Errorf("FATAL: Невалидные тайминги полета")
+		return nil, fmt.Errorf("FATAL: Невалидные тайминги полета (min=%d, max=%d)", cfg.MinDurationSec, cfg.MaxDurationSec)
+	}
+
+	if cfg.IdleMinSec < 0 || cfg.IdleMaxSec < 0 || cfg.IdleMinSec > cfg.IdleMaxSec {
+    return nil, fmt.Errorf("FATAL: Невалидные тайминги простоя (min=%d, max=%d)", cfg.IdleMinSec, cfg.IdleMaxSec)
+	}
+
+	if cfg.BatchSize <= 0 || cfg.FlushIntervalMs <= 0 {
+		return nil, fmt.Errorf("FATAL: Невалидные настройки батчинга (size=%d, interval=%d)", cfg.BatchSize, cfg.FlushIntervalMs)
 	}
 
 	db, err := sql.Open("sqlite", cfg.DBPath)
@@ -57,10 +60,10 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		return nil, fmt.Errorf("ошибка открытия БД: %w", err)
 	}
 
-	// 🚨 ПАРАНОЙЯ L2: Запрет мультиплексирования (один коннект к файлу для избежания Database is locked)
+	// 🚨 ПАРАНОЙЯ L1: Запрет мультиплексирования (один коннект к файлу)
 	db.SetMaxOpenConns(1)
 
-	// 🚨 ПАРАНОЙЯ L3: WAL режим + Autocheckpoint (Спасение SSD от переполнения журнала)
+	// 🚨 ПАРАНОЙЯ L2: WAL режим + Autocheckpoint (Спасение SSD от переполнения журнала)
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL;",
 		"PRAGMA synchronous=NORMAL;",
@@ -72,7 +75,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		}
 	}
 
-	// 🚨 ПАРАНОЙЯ L4: Recovery (Санитарная очистка брошенных полетов после краша)
+	// 🚨 ПАРАНОЙЯ L3: Recovery (Санитарная очистка брошенных полетов)
 	res, err := db.Exec("UPDATE flights SET status = 'PENDING' WHERE status IN ('IN_FLIGHT', 'INTERRUPTED')")
 	if err != nil {
 		return nil, fmt.Errorf("ошибка Recovery при обновлении статусов: %w", err)
@@ -82,55 +85,35 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		log.Printf("[DISPATCHER] Внимание: Выполнено восстановление %d прерванных рейсов обратно в PENDING.", rowsAffected)
 	}
 
-	d := &Dispatcher{
+	return &Dispatcher{
 		db:          db,
-		TakeoffChan: make(chan TakeoffRequest, cfg.BatchSize),
+		TakeoffChan: make(chan TakeoffRequest, cfg.BatchSize), // Буфер канала зависит от конфига
 		LandingChan: make(chan LandingReport, cfg.BatchSize),
 		config:      cfg,
-		unitClocks:  make(map[int32]time.Time),
-	}
-	
-	// По умолчанию интерцептор просто вызывает базовый метод записи
-	d.flushInterceptor = d.defaultFlushLandings
-
-	return d, nil
+		unitClocks:  make(map[int32]time.Time), //new: Инициализация логических часов для каждого двигателя
+	}, nil
 }
 
-// GetDB возвращает указатель на БД для Оркестратора Хаоса (Zombie State Attack).
-func (d *Dispatcher) GetDB() *sql.DB {
-	return d.db
-}
-
-// SetLandingInterceptor позволяет внедрить Middleware для саботажа процесса посадки.
-// Это инъекция хаоса уровня "Sauron" (CMMS Split Brain).
-func (d *Dispatcher) SetLandingInterceptor(interceptor func(context.Context, LandingReport, func(context.Context, []LandingReport))) {
-	d.flushInterceptor = func(batch []LandingReport) {
-		for _, rep := range batch {
-			interceptor(context.Background(), rep, func(ctx context.Context, r []LandingReport) {
-				d.defaultFlushLandings(r)
-			})
-		}
-	}
-}
-
+// Start запускает Event Loop в фоновой горутине. NEW
 func (d *Dispatcher) Start(ctx context.Context) {
-	d.wg.Add(1)
+	d.wg.Add(1) // Увеличиваем счетчик Диспетчера, чтобы Wait() знал, что есть активная горутина
 	go func() {
-		defer d.wg.Done()
+		defer d.wg.Done() // Снимаем блокировку, когда цикл завершится
 		d.runEventLoop(ctx)
 	}()
 }
 
-// Wait блокирует вызывающую горутину, пока Диспетчер полностью не остановится.
+// Wait блокирует выполнение, пока Диспетчер безопасно не завершит работу (Flush)
 func (d *Dispatcher) Wait() {
-	d.wg.Wait()
+    d.wg.Wait()
 }
 
-// runEventLoop — сердце Диспетчера. Обеспечивает Lock-Free доступ к БД через каналы (CSP).
-func (d *Dispatcher) runEventLoop(ctx context.Context) {
-	// Пред-аллокация памяти (Zero-Allocation паттерн) для батчинга
-	landingBatch := make([]LandingReport, 0, d.config.BatchSize)
 
+// runEventLoop — сердце Диспетчера. Обеспечивает Lock-Free доступ к БД.
+func (d *Dispatcher) runEventLoop(ctx context.Context) {
+	// Пред-аллокация памяти (Zero-Allocation паттерн)
+	landingBatch := make([]LandingReport, 0, d.config.BatchSize)
+	
 	flushTicker := time.NewTicker(time.Duration(d.config.FlushIntervalMs) * time.Millisecond)
 	defer flushTicker.Stop()
 
@@ -139,9 +122,9 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// 🚨 ПАРАНОЙЯ L5: Graceful Shutdown
+			// 🚨 ПАРАНОЙЯ L4: Graceful Shutdown
 			if len(landingBatch) > 0 {
-				d.flushInterceptor(landingBatch)
+				d.flushLandings(landingBatch)
 			}
 			d.db.Close()
 			log.Println("[DISPATCHER] Остановлен. БД безопасно закрыта.")
@@ -153,13 +136,13 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 		case report := <-d.LandingChan:
 			landingBatch = append(landingBatch, report)
 			if len(landingBatch) >= d.config.BatchSize {
-				d.flushInterceptor(landingBatch)
-				landingBatch = landingBatch[:0]
+				d.flushLandings(landingBatch)
+				landingBatch = landingBatch[:0] // Очистка среза без утечек памяти
 			}
 
 		case <-flushTicker.C:
 			if len(landingBatch) > 0 {
-				d.flushInterceptor(landingBatch)
+				d.flushLandings(landingBatch)
 				landingBatch = landingBatch[:0]
 			}
 		}
@@ -169,30 +152,19 @@ func (d *Dispatcher) runEventLoop(ctx context.Context) {
 // handleTakeoff ищет следующий полет и бронирует его транзакцией.
 func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 	var rec FlightRecord
-	var _id int 
 	var _status string
 	var _start, _dur sql.NullString
 
-	// Используем точное перечисление колонок во избежание проблем с SELECT * при добавлении новых колонок
-	query := `SELECT 
-		id, status, flight_start_time, target_duration_sec,
-		unit_number, time_cycles, op_setting_1, op_setting_2, op_setting_3,
-		T2, T24, T30, T50, P2, P15, P30, Nf, Nc, epr, Ps30, phi, NRf, NRc,
-		BPR, farB, htBleed, Nf_dmd, PCNfR_dmd, W31, W32
-		FROM flights 
-		WHERE unit_number = ? AND status = 'PENDING' 
-		ORDER BY time_cycles ASC LIMIT 1`
-
+	query := `SELECT * FROM flights WHERE unit_number = ? AND status = 'PENDING' ORDER BY time_cycles ASC LIMIT 1`
 	row := d.db.QueryRow(query, req.UnitNumber)
 
-	// Сканируем результаты строго в соответствии с автосгенерированной структурой FlightRecord
 	err := row.Scan(
-		&_id, &_status, &_start, &_dur,
-		&rec.UnitNumber, &rec.TimeCycles,
-		&rec.OpSetting1, &rec.OpSetting2, &rec.OpSetting3,
-		&rec.T2, &rec.T24, &rec.T30, &rec.T50, &rec.P2, &rec.P15, &rec.P30,
-		&rec.Nf, &rec.Nc, &rec.Epr, &rec.Ps30, &rec.Phi, &rec.Nrf, &rec.Nrc,
-		&rec.Bpr, &rec.Farb, &rec.Htbleed, &rec.NfDmd, &rec.PcnfrDmd, &rec.W31, &rec.W32,
+		&_status, &_start, &_dur, // 3 системные
+		&rec.UnitNumber, &rec.TimeCycles, // 2 идентификатора
+		&rec.OpSetting1, &rec.OpSetting2, &rec.OpSetting3, // 3 настройки
+		&rec.T2, &rec.T24, &rec.T30, &rec.T50, &rec.P2, &rec.P15, &rec.P30, // Датчики 1
+		&rec.Nf, &rec.Nc, &rec.Epr, &rec.Ps30, &rec.Phi, &rec.NRf, &rec.NRc, // Датчики 2
+		&rec.BPR, &rec.FarB, &rec.HtBleed, &rec.Nf_dmd, &rec.PCNfR_dmd, &rec.W31, &rec.W32, // Датчики 3
 	)
 
 	if err == sql.ErrNoRows {
@@ -208,7 +180,7 @@ func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 
 	var startTime time.Time
 
-	// Машина состояний времени (Watermarking anchor)
+	// 🚨 ПАРАНОЙЯ L5: Машина состояний времени. NEW
 	if d.config.SimulationMode == "REALTIME" {
 		startTime = time.Now().UTC()
 	} else {
@@ -218,32 +190,29 @@ func (d *Dispatcher) handleTakeoff(req TakeoffRequest) {
 		}
 		idleSec := rand.IntN(d.config.IdleMaxSec-d.config.IdleMinSec+1) + d.config.IdleMinSec
 		startTime = lastTime.Add(time.Duration(idleSec) * time.Second)
-		// Сохраняем время окончания этого полета как якорь для следующего
 		d.unitClocks[req.UnitNumber] = startTime.Add(time.Duration(durationSec) * time.Second)
 	}
 
 	startTimeStr := startTime.Format(time.RFC3339)
 
-	// Бронируем рейс (чтобы другая горутина его не забрала)
-	updateQ := `UPDATE flights SET status = 'IN_FLIGHT', flight_start_time = ?, target_duration_sec = ? WHERE id = ?`
-	_, err = d.db.Exec(updateQ, startTimeStr, durationSec, _id)
+	updateQ := `UPDATE flights SET status = 'IN_FLIGHT', flight_start_time = ?, target_duration_sec = ? WHERE unit_number = ? AND time_cycles = ?`
+	_, err = d.db.Exec(updateQ, startTimeStr, durationSec, rec.UnitNumber, rec.TimeCycles)
 	if err != nil {
-		log.Printf("[DISPATCHER] Ошибка бронирования рейса Unit-%d (ID:%d): %v", req.UnitNumber, _id, err)
-		req.RespChan <- TakeoffResponse{HasMoreFlights: false} 
-		return
+		log.Printf("[DISPATCHER] Ошибка бронирования рейса Unit-%d: %v", req.UnitNumber, err)
+		req.RespChan <- TakeoffResponse{HasMoreFlights: false} // <-- Отменяем старт для воркера
+		return // <-- Обязательно прерываем функцию, иначе воркер получит данные, но рейс не будет забронирован, что приведет к коллизиям и неконсистентности данных.
 	}
 
-	// Выдаем "Разрешение на взлет" борту
 	req.RespChan <- TakeoffResponse{
 		HasMoreFlights:    true,
-		Record:            rec, 
+		Record:            rec,
 		StartTime:         startTime,
 		TargetDurationSec: durationSec,
 	}
 }
 
-// defaultFlushLandings — оригинальная логика сброса логов (без хаоса).
-func (d *Dispatcher) defaultFlushLandings(batch []LandingReport) {
+// flushLandings делает массовый UPDATE (Батчинг) для спасения диска Asus.
+func (d *Dispatcher) flushLandings(batch []LandingReport) {
 	tx, err := d.db.Begin()
 	if err != nil {
 		log.Printf("[DISPATCHER] Ошибка старта транзакции батча: %v", err)

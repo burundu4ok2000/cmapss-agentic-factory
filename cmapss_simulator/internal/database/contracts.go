@@ -2,53 +2,61 @@ package database
 
 import "time"
 
-// ==============================================================================
-// Доменная бизнес-логика симулятора (Взаимодействие компонентов).
-// ВНИМАНИЕ: Структура FlightRecord удалена отсюда, так как она теперь
-// автоматически генерируется из YAML-контракта в файле schema_generated.go.
-// ==============================================================================
+// FlightRecord — строгий дата-контракт L2.
+// Отражает одну строку физики из транзакционной базы SQLite.
+// AI-Ready: Все типы жестко зафиксированы (int32, float64).
+type FlightRecord struct {
+	UnitNumber int32
+	TimeCycles int32
 
-// TakeoffRequest — запрос от горутины-самолета (Edge Device) к Диспетчеру базы данных
-// на получение следующего полетного цикла для симуляции.
-// AI-Ready: Использует каналы для строгой потокобезопасности и защиты от гонок данных (Data Races).
+	// Операционные настройки
+	OpSetting1 float64
+	OpSetting2 float64
+	OpSetting3 float64
+
+	// Датчики NASA (21 шт.)
+	T2        float64
+	T24       float64
+	T30       float64
+	T50       float64
+	P2        float64
+	P15       float64
+	P30       float64
+	Nf        float64
+	Nc        float64
+	Epr       float64
+	Ps30      float64
+	Phi       float64
+	NRf       float64
+	NRc       float64
+	BPR       float64
+	FarB      float64
+	HtBleed   float64
+	Nf_dmd    float64
+	PCNfR_dmd float64
+	W31       float64
+	W32       float64
+}
+
+// TakeoffRequest — запрос от горутины-самолета на получение следующего полетного цикла.
 type TakeoffRequest struct {
 	UnitNumber int32
-
-	// RespChan — индивидуальный канал обратной связи (защита от Deadlock).
-	// Каждая горутина-борт передает свой личный небуферизованный канал
-	// для получения детерминированного ответа от Диспетчера.
+	// RespChan — канал обратной связи (защита от Deadlock).
+	// Каждая горутина передает свой личный канал для получения ответа от Диспетчера.
 	RespChan chan<- TakeoffResponse
 }
 
 // TakeoffResponse — ответ Диспетчера с выданным заданием на полет.
-// Содержит базовую физику (Baseline), которая будет развернута в 100 Гц на борту.
 type TakeoffResponse struct {
-	
-	// HasMoreFlights равен False, если у турбины больше нет PENDING циклов
-	// (счетчик RUL исчерпан, имитация физического разрушения турбины).
-	HasMoreFlights bool
-
-	// Record ссылается на автосгенерированную структуру из schema_generated.go.
-	// Гарантирует 100% совпадение типов с единым источником истины (YAML).
-	Record FlightRecord
-
-	// StartTime задает системный (UTC) или исторический якорь времени
-	// для точной временной синхронизации (закладка для механизма Watermarking в Spark).
-	StartTime time.Time
-
-	// TargetDurationSec определяет рандомизированную длительность полета 
-	// для симуляции реального эшелона и растягивания 100 Гц телеметрии.
-	TargetDurationSec int
+	HasMoreFlights    bool         // False, если у турбины больше нет PENDING циклов (взрыв)
+	Record            FlightRecord // Эталонные значения датчиков
+	StartTime         time.Time    // Системный (UTC) или исторический якорь времени
+	TargetDurationSec int          // Рандомизированная длительность полета
 }
 
-// LandingReport — отчет от горутины-самолета о завершении или экстренном прерывании полета.
-// Используется для изменения состояния (State) рейса в SQLite, что в будущем
-// послужит триггером для CDC (Debezium) и запуска ремонтных консилиумов ИИ-агентов.
+// LandingReport — отчет от горутины-самолета о завершении или прерывании полета.
 type LandingReport struct {
 	UnitNumber int32
 	TimeCycles int32
-
-	// Status определяет исход рейса.
-	// Допустимые значения по контракту: "COMPLETED", "FAILED" (кибератака), "INTERRUPTED".
-	Status string
+	Status     string // Допустимые значения: "COMPLETED", "FAILED", "INTERRUPTED"
 }
