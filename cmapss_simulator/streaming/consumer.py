@@ -30,6 +30,7 @@ schema = StructType([
     StructField("P30", DoubleType(), True),
     StructField("Nf", DoubleType(), True),
     StructField("Nc", DoubleType(), True),
+    StructField("phi", DoubleType(), True),
 ])
 
 def main():
