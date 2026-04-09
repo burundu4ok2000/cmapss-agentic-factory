@@ -1,3 +1,4 @@
-pyspark==3.5.0
-google-cloud-storage==2.14.0
-kafka-python==2.0.2
+pyspark==4.1.1
+numpy
+pandas
+pyarrow
