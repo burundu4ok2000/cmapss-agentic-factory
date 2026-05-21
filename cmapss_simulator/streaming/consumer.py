@@ -16,7 +16,7 @@ os.environ['PYSPARK_DRIVER_PYTHON'] = "/home/linuxbrew/.linuxbrew/bin/python3"
 KAFKA_BROKER = os.getenv("KAFKA_BROKERS", "localhost:9092")
 KAFKA_TOPIC = "engine_telemetry"
 GCS_BUCKET = "cmapss-datalake-bucket"
-GCP_CREDS = "/home/donald_trump/.google/credentials/my-credentials.json"
+GCP_CREDS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
 # GCS Cloud Storage Paths
 OUTPUT_PATH = f"gs://{GCS_BUCKET}/telemetry/data/"

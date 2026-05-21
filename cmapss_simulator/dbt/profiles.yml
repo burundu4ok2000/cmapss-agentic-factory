@@ -4,7 +4,7 @@ cmapss_go_sim:
     dev:
       type: bigquery
       method: service-account
-      keyfile: /home/donald_trump/.google/credentials/my-credentials.json
+      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"
       project: de-zoomcamp-2026-485615
       dataset: cmapss_telemetry
       threads: 4
